@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Plant Cloud</title>
+  <style>
+    /* Apply Courier across all UI elements */
+    html, body, button, .dg, .dg * {
+      font-family: 'Courier New', Courier, monospace !important;
+    }
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: #000; overflow: hidden; 
+    }
+    canvas { display: block; }
+    #back {
+      position: absolute; top: 10px; left: 10px; z-index: 10;
+      padding: 6px 12px; background: #000; color: #fff;
+      border-radius: 4px; cursor: pointer; user-select: none;
+    }
+    #info {
+      position: absolute; bottom: 10px; left: 10px; z-index: 10;
+      padding: 8px 12px; background: rgba(0,0,0,0.6); color: #fff;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 14px; line-height: 1.4em; border-radius: 6px;
+      max-width: 90vw; box-sizing: border-box; word-wrap: break-word;
+    }
+    #info p { margin: 0; padding: 2px 0; }
+    @media (max-width: 600px) {
+      #info { font-size: 12px; padding: 6px 10px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="back">← Gallery</div>
+  <div id="info"></div>
+
+  <script type="module">
+    import * as THREE from 'https://esm.sh/three@0.150.1';
+    import { OrbitControls } from 'https://esm.sh/three@0.150.1/examples/jsm/controls/OrbitControls.js';
+    import { PLYLoader } from 'https://esm.sh/three@0.150.1/examples/jsm/loaders/PLYLoader.js';
+
+    const params = new URLSearchParams(window.location.search);
+    const fileParam = params.get('id') || params.get('ply');
+    if (!fileParam) {
+      window.location.href = 'index.html';
+      throw new Error('No PLY specified');
+    }
+    const plyFile = `models/${fileParam}`;
+
+    // --- Manual info mapping per PLY (edit this) ---
+    // Your manual lines stay as-is; we append an automatic "Points (from file): N" line after load.
+    const plyInfo = {
+      "modelA.ply": [
+        "Name: JAPANESE WHITE PINE",
+        "Binomial Name: Pinus parviflora",
+        "Living Since: 1733",
+      ],
+      "modelB.ply": [
+        "Name: TURCZANINOW'S HORNBEAM",
+        "Bonsai Style: Forest",
+      ],
+      "modelC.ply": [
+        "Name: TRIDENT MAPLE",
+        "Binomial Name: Acer Buergerianum",
+        "Living Since: 1975",
+        "Bonsai Style: Root Over Rock"
+      ],
+      "modelD.ply": [
+        "Name: DAIMYO OAK",
+        "Binomial Name: Quercus Dentata",
+        "Living Since: 1851",
+        "Bonsai Style: Literati"
+      ],
+      "modelE.ply": [
+        "Name: JAPANESE MAPLE",
+        "Binomial Name: Acer Palmatum",
+        "Bonsai Style: Forest"
+      ],
+      "modelF.ply": [
+        "Name: AUSTRALIAN BRUSH CHERRY",
+        "Binomial Name: Syzygium paniculatum",
+        "Bonsai Style: Informal Upright"
+      ],
+      "modelG.ply": [
+        "Name: JUNIPER",
+        "Binomial Name: Juniperus Scopulorum",
+        "Age: 500 Years Old in 2010",
+        "Bonsai Style: Cascade Style"
+      ],
+      "modelH.ply": [
+        "Name: AUSTRALIAN BRUSH CHERRY",
+        "Binomial Name: Syzygium paniculatum",
+        "Bonsai Style: Informal Upright"
+      ],
+      "modelI.ply": [
+        "Name: DAWN REDWOOD",
+        "Binomial Name: Metasequoia Glyptostroboides",
+        "Bonsai Style: FOREST"
+      ]
+
+      // ➕ Add entries for each .ply file (keys must exactly match the filename)
+    };
+
+    // Update info box based on the file + optional dynamic extras (e.g., pointCount)
+    function updateInfoBox(file, extras = {}) {
+      const infoDiv = document.getElementById('info');
+      const fallback = [
+        `File: ${file}`,
+        "Vertices: —",
+        "Format: —",
+        "Description: No info available."
+      ];
+      const baseLines = (plyInfo[file] || fallback).slice();
+
+      // Append dynamic lines without modifying your manual ones
+      const dynamicLines = [];
+      if (typeof extras.pointCount === 'number') {
+        const formatted = extras.pointCount.toLocaleString();
+        dynamicLines.push(`Points (from file): ${formatted}`);
+      }
+
+      infoDiv.innerHTML = [...baseLines, ...dynamicLines]
+        .map(line => `<p>${line}</p>`)
+        .join("");
+    }
+
+    let scene, camera, renderer, controls, clock;
+    let points, material;
+    let origPositions, origColors, origCount;
+    let orbiting = false;
+    const orbitDuration = 8, maxOrbitAngle = Math.PI, revealDuration = 5;
+    let idleTimeout; const idleDelay = 6000;
+
+    const guiParams = {
+      pointSize: 0.0075,
+      vertexColors: true,
+      sizeAttenuation: true,
+      shadingIntensity: 1.5,
+      revealNoise: 0.1,
+      bgColor: '#000000',
+      density: 0   // densify duplicates (0 = none). Displayed point count will be higher if > 0.
+    };
+
+    init(); animate();
+
+    function init() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color('#000000');
+
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(window.devicePixelRatio); // Keep HiDPI
+      document.body.appendChild(renderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      const resetIdle = () => { orbiting = false; clearTimeout(idleTimeout); idleTimeout = setTimeout(() => orbiting = true, idleDelay); };
+      controls.addEventListener('start', () => orbiting = false);
+      controls.addEventListener('end', resetIdle);
+      ['mousedown','wheel','touchstart','keydown'].forEach(e => window.addEventListener(e, resetIdle));
+
+      clock = new THREE.Clock();
+      window.addEventListener('resize', onResize);
+
+      new PLYLoader().load(
+        plyFile,
+        onLoad,
+        undefined,
+        err => console.error('Error loading PLY:', err)
+      );
+
+      document.getElementById('back').onclick = () => window.location.href = 'index.html';
+
+      // Show manual info immediately while loading; point count gets appended after load.
+      updateInfoBox(fileParam);
+    }
+
+    function onLoad(geometry) {
+      geometry.computeBoundingSphere();
+
+      // Raw, from-file point count (before any densify)
+      const posAttr = geometry.getAttribute('position');
+      origCount = posAttr ? posAttr.count : 0;
+
+      // Keep originals to support densify
+      origPositions = posAttr ? posAttr.array.slice() : new Float32Array();
+      const colorAttr = geometry.getAttribute('color');
+      origColors = colorAttr ? colorAttr.array.slice() : new Float32Array(origCount * 3).fill(1);
+
+      // Build initial (possibly densified) Points object
+      densifyGeometry(guiParams.density);
+
+      // Compute reveal range along a direction
+      const dir = new THREE.Vector3(1, 0, 1).normalize();
+      let minD = Infinity, maxD = -Infinity;
+      const posArr = points.geometry.getAttribute('position');
+      for (let i = 0; i < posArr.count; i++) {
+        const v = new THREE.Vector3(posArr.getX(i), posArr.getY(i), posArr.getZ(i));
+        const d = v.dot(dir);
+        minD = Math.min(minD, d);
+        maxD = Math.max(maxD, d);
+      }
+
+      // Camera framing
+      const center = points.geometry.boundingSphere.center;
+      const radius = points.geometry.boundingSphere.radius;
+      camera.position.copy(center).add(new THREE.Vector3(0, 0, radius * 1.7));
+      controls.target.copy(center); controls.update();
+
+      // Shader material
+      material = createRevealMaterial(dir, minD, maxD);
+      points.material = material;
+      material.uniforms.uReveal.value = 0;
+
+      // Append computed point count to info box (raw from file)
+      updateInfoBox(fileParam, { pointCount: origCount });
+
+      clock.start(); orbiting = true;
+    }
+
+    function densifyGeometry(density) {
+      const count = origCount;
+      const newCount = count * (1 + density);
+      const positions = new Float32Array(newCount * 3);
+      const colors    = new Float32Array(newCount * 3);
+      let src = 0, dst = 0;
+
+      for (let i = 0; i < count; i++) {
+        positions.set(origPositions.subarray(src, src + 3), dst);
+        colors.set(origColors.subarray(src, src + 3), dst); dst += 3;
+
+        for (let j = 0; j < density; j++) {
+          positions[dst]   = origPositions[src]   + (Math.random() - 0.5) * 0.01;
+          positions[dst+1] = origPositions[src+1] + (Math.random() - 0.5) * 0.01;
+          positions[dst+2] = origPositions[src+2] + (Math.random() - 0.5) * 0.01;
+          colors.set(origColors.subarray(src, src + 3), dst); dst += 3;
+        }
+        src += 3;
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+      geo.computeBoundingSphere();
+
+      if (points) { points.geometry.dispose(); points.geometry = geo; }
+      else { points = new THREE.Points(geo, null); scene.add(points); }
+    }
+
+    function createRevealMaterial(dir, minD, maxD) {
+      const pr = renderer.getPixelRatio ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
+      const scale = (window.innerHeight * pr) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+      const defs = {};
+      if (guiParams.sizeAttenuation) defs.USE_SIZE_ATTENUATION = '';
+      if (guiParams.vertexColors)    defs.USE_VERTEX_COLORS    = '';
+
+      return new THREE.ShaderMaterial({
+        defines: defs,
+        transparent: true,
+        uniforms: {
+          uSize:   { value: guiParams.pointSize },
+          uScale:  { value: scale },
+          uShade:  { value: guiParams.shadingIntensity },
+          uDir:    { value: dir },
+          uMin:    { value: minD },
+          uMax:    { value: maxD },
+          uReveal: { value: 0 },
+          uNoise:  { value: guiParams.revealNoise }
+        },
+        vertexShader: `
+          uniform vec3 uDir; uniform float uSize; uniform float uScale;
+          varying float vDot;
+          #ifdef USE_VERTEX_COLORS
+            attribute vec3 color;
+            varying vec3 vColor;
+          #endif
+          void main() {
+            #ifdef USE_VERTEX_COLORS
+              vColor = color;
+            #endif
+            vDot = dot(position, uDir);
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            gl_Position = projectionMatrix * mv;
+            #ifdef USE_SIZE_ATTENUATION
+              gl_PointSize = uSize * (uScale / -mv.z);
+            #else
+              gl_PointSize = uSize;
+            #endif
+          }
+        `,
+        fragmentShader: `
+          precision highp float;
+          varying float vDot;
+          uniform float uShade, uMin, uMax, uReveal, uNoise;
+          #ifdef USE_VERTEX_COLORS
+            varying vec3 vColor;
+          #endif
+          void main() {
+            float t = (vDot - uMin) / (uMax - uMin);
+            float rnd = fract(sin(vDot * 12.9898) * 43758.5453);
+            float noisyT = t + (rnd * 2.0 - 1.0) * uNoise;
+            if (noisyT > uReveal) discard;
+
+            vec2 c = gl_PointCoord - vec2(0.5);
+            if (dot(c, c) > 0.25) discard;
+
+            float glow = smoothstep(uReveal - uNoise, uReveal, t) * (1.0 - smoothstep(uReveal, uReveal + uNoise, t));
+            float shade = uShade + glow * uShade;
+
+            #ifdef USE_VERTEX_COLORS
+              gl_FragColor = vec4(vColor * shade, 1.0);
+            #else
+              gl_FragColor = vec4(vec3(shade), 1.0);
+            #endif
+          }
+        `,
+        depthTest: true
+      });
+    }
+
+    function updateMaterial() {
+      if (!points) return;
+      const dir = material.uniforms.uDir.value;
+      const minD = material.uniforms.uMin.value;
+      const maxD = material.uniforms.uMax.value;
+      const rev = material.uniforms.uReveal.value;
+      material.dispose();
+      material = createRevealMaterial(dir, minD, maxD);
+      material.uniforms.uReveal.value = rev;
+      points.material = material;
+    }
+
+    function onResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      if (material) {
+        const pr = renderer.getPixelRatio ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
+        material.uniforms.uScale.value = (window.innerHeight * pr) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+      }
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = clock.getDelta();
+
+      if (orbiting) {
+        const tx = controls.target.x, tz = controls.target.z;
+        const cx = camera.position.x - tx, cz = camera.position.z - tz;
+        const newAngle = Math.atan2(cz, cx) + (maxOrbitAngle / orbitDuration) * dt;
+        const r = Math.sqrt(cx * cx + cz * cz);
+        camera.position.set(tx + Math.cos(newAngle) * r, camera.position.y, tz + Math.sin(newAngle) * r);
+        camera.lookAt(controls.target);
+      }
+
+      // Keep uScale in sync with DPR; update reveal
+      if (material) {
+        const pr = renderer.getPixelRatio ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
+        material.uniforms.uScale.value = (window.innerHeight * pr) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+        material.uniforms.uReveal.value = Math.min(clock.getElapsedTime() / revealDuration, 1);
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
