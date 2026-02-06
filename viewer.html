@@ -49,301 +49,436 @@
   <div id="info"></div>
 
   <script type="module">
-  import * as THREE from 'https://esm.sh/three@0.150.1';
-  import { OrbitControls } from 'https://esm.sh/three@0.150.1/examples/jsm/controls/OrbitControls.js';
-  import { PLYLoader } from 'https://esm.sh/three@0.150.1/examples/jsm/loaders/PLYLoader.js';
+  import * as THREE from "https://esm.sh/three@0.150.1";
+  import { OrbitControls } from "https://esm.sh/three@0.150.1/examples/jsm/controls/OrbitControls.js";
+  import { PLYLoader } from "https://esm.sh/three@0.150.1/examples/jsm/loaders/PLYLoader.js";
 
-  const params = new URLSearchParams(window.location.search);
-  const fileParam = params.get('id') || params.get('ply');
+  // -----------------------------
+  // Constants
+  // -----------------------------
+  const REVEAL_DURATION = 5;
+  const ORBIT_DURATION = 8;
+  const MAX_ORBIT_ANGLE = Math.PI;
+  const ORBIT_RESUME_DELAY_MS = 1500;
 
-  if (!fileParam) {
-    window.location.href = 'index.html';
-    throw new Error('No PLY specified');
-  }
+  const SPLAT_ZOOM_EXP_COEFF = 0.0018; // smaller = slower
+  const SPLAT_PAN_SENS = 0.002;        // scaled by distance
 
-  // ---- Analytics: viewer session timer (starts only after fileParam is valid) ----
-  const viewerSessionStart = Date.now();
+  const FADE_MS = 420;
 
-  function sendViewerTimeSpent() {
-    // Avoid errors if analytics is blocked or not loaded
-    if (!window.gtag) return;
+  // Toast timing
+  const TOAST_SHOW_MS = 2200;
 
-    const seconds = Math.round((Date.now() - viewerSessionStart) / 1000);
+  // -----------------------------
+  // CSS (button + loader + toast)
+  // -----------------------------
+  const style = document.createElement("style");
+  style.textContent = `
+    .mode-toggle {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 10000;
+      padding: 8px 12px;
+      background: #000;
+      color: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+      user-select: none;
+      border: 1px solid rgba(255,255,255,0.25);
+      font: 13px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .mode-toggle:hover { border-color: rgba(255,255,255,0.7); }
 
-    // Optional: ignore super-short accidental opens
-    if (seconds < 2) return;
-
-    gtag('event', 'viewer_time_spent', {
-      model_name: fileParam,
-      seconds_spent: seconds
-    });
-  }
-
-  // Fires when user leaves page normally (works in most cases)
-  window.addEventListener('pagehide', sendViewerTimeSpent);
-
-  // Backup for older behavior
-  window.addEventListener('beforeunload', sendViewerTimeSpent);
-
-  const plyFile = `models/${fileParam}`;
-
-  // --- Manual info mapping per PLY (edit this) ---
-  // Your manual lines stay as-is; we append an automatic "Points (from file): N" line after load.
-  const plyInfo = {
-    "modelA.ply": [
-      "Name: JAPANESE WHITE PINE",
-      "Binomial Name: Pinus parviflora",
-      "Living Since: 1733",
-    ],
-    "modelB.ply": [
-      "Name: TURCZANINOW'S HORNBEAM",
-      "Bonsai Style: Forest",
-    ],
-    "modelC.ply": [
-      "Name: TRIDENT MAPLE",
-      "Binomial Name: Acer Buergerianum",
-      "Living Since: 1975",
-      "Bonsai Style: Root Over Rock"
-    ],
-    "modelD.ply": [
-      "Name: DAIMYO OAK",
-      "Binomial Name: Quercus Dentata",
-      "Living Since: 1851",
-      "Bonsai Style: Literati"
-    ],
-    "modelE.ply": [
-      "Name: JAPANESE MAPLE",
-      "Binomial Name: Acer Palmatum",
-      "Bonsai Style: Forest"
-    ],
-    "modelF.ply": [
-      "Name: AUSTRALIAN BRUSH CHERRY",
-      "Binomial Name: Syzygium paniculatum",
-      "Bonsai Style: Informal Upright"
-    ],
-    "modelG.ply": [
-      "Name: JUNIPER",
-      "Binomial Name: Juniperus Scopulorum",
-      "Age: 500 Years Old in 2010",
-      "Bonsai Style: Cascade Style"
-    ],
-    "modelH.ply": [
-      "Name: AUSTRALIAN BRUSH CHERRY",
-      "Binomial Name: Syzygium paniculatum",
-      "Bonsai Style: Informal Upright"
-    ],
-    "modelI.ply": [
-      "Name: DAWN REDWOOD",
-      "Binomial Name: Metasequoia Glyptostroboides",
-      "Bonsai Style: Forest"
-    ],
-    "modelJ.ply": [
-      "Name: Japanese Larch",
-      "Binomial Name: Larix kaempferi",
-      "Bonsai Style: Slant"
-    ]
-
-    // ➕ Add entries for each .ply file (keys must exactly match the filename)
-  };
-
-  // Update info box based on the file + optional dynamic extras (e.g., pointCount)
-  function updateInfoBox(file, extras = {}) {
-    const infoDiv = document.getElementById('info');
-    const fallback = [
-      `File: ${file}`,
-      "Vertices: —",
-      "Format: —",
-      "Description: No info available."
-    ];
-    const baseLines = (plyInfo[file] || fallback).slice();
-
-    // Append dynamic lines without modifying your manual ones
-    const dynamicLines = [];
-    if (typeof extras.pointCount === 'number') {
-      const formatted = extras.pointCount.toLocaleString();
-      dynamicLines.push(`Points (from file): ${formatted}`);
+    .loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.7);
+      pointer-events: all;
+    }
+    .dots { display:flex; gap:10px; align-items:center; justify-content:center; }
+    .dot {
+      width: 8px; height: 8px; border-radius: 999px;
+      background: #fff; opacity: 0.25;
+      animation: dotPulse 1.1s infinite ease-in-out;
+    }
+    .dot:nth-child(1){animation-delay:0ms;}
+    .dot:nth-child(2){animation-delay:120ms;}
+    .dot:nth-child(3){animation-delay:240ms;}
+    .dot:nth-child(4){animation-delay:360ms;}
+    .dot:nth-child(5){animation-delay:480ms;}
+    @keyframes dotPulse {
+      0%,100% { transform: translateY(0); opacity:0.25; }
+      50%     { transform: translateY(-6px); opacity:1; }
     }
 
-    infoDiv.innerHTML = [...baseLines, ...dynamicLines]
-      .map(line => `<p>${line}</p>`)
-      .join("");
-  }
+    .toast {
+      position: fixed;
+      top: 52px;
+      right: 12px;
+      z-index: 10001;
+      background: rgba(0,0,0,0.9);
+      color: rgba(255,255,255,0.92);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 8px;
+      padding: 10px 12px;
+      max-width: min(360px, calc(100vw - 24px));
+      font: 12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      opacity: 0;
+      transform: translateY(-6px);
+      pointer-events: none;
+      transition: opacity 240ms ease, transform 240ms ease;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  `;
+  document.head.appendChild(style);
 
-  let scene, camera, renderer, controls, clock;
-  let points, material;
-  let origPositions, origColors, origCount;
-  let orbiting = false;
-  const orbitDuration = 8, maxOrbitAngle = Math.PI, revealDuration = 5;
-  let idleTimeout; const idleDelay = 6000;
+  // -----------------------------
+  // Params + file mapping
+  // -----------------------------
+  const params = new URLSearchParams(window.location.search);
+  const fileParam = params.get("id") || params.get("ply");
+  if (!fileParam) throw new Error("Missing ?ply=modelX.ply");
 
-  const guiParams = {
-    pointSize: 0.0075,
-    vertexColors: true,
-    sizeAttenuation: true,
-    shadingIntensity: 1.5,
-    revealNoise: 0.1,
-    bgColor: '#000000',
-    density: 0   // densify duplicates (0 = none). Displayed point count will be higher if > 0.
+  const baseName = fileParam.replace(/\.ply$/i, "");
+  const plyUrl = `models/${fileParam}`;
+  const splatUrl = `models/${baseName}_Splat.ply`;
+
+  // -----------------------------
+  // --- Manual info mapping per PLY (edit this) ---
+  // -----------------------------
+  const plyInfo = {
+    "modelA.ply": ["Name: JAPANESE WHITE PINE", "Binomial Name: Pinus parviflora", "Living Since: 1733"],
+    "modelB.ply": ["Name: TURCZANINOW'S HORNBEAM", "Bonsai Style: Forest"],
+    "modelC.ply": ["Name: TRIDENT MAPLE", "Binomial Name: Acer Buergerianum", "Living Since: 1975", "Bonsai Style: Root Over Rock"],
+    "modelD.ply": ["Name: DAIMYO OAK", "Binomial Name: Quercus Dentata", "Living Since: 1851", "Bonsai Style: Literati"],
+    "modelE.ply": ["Name: JAPANESE MAPLE", "Binomial Name: Acer Palmatum", "Bonsai Style: Forest"],
+    "modelF.ply": ["Name: AUSTRALIAN BRUSH CHERRY", "Binomial Name: Syzygium paniculatum", "Bonsai Style: Informal Upright"],
+    "modelG.ply": ["Name: JUNIPER", "Binomial Name: Juniperus Scopulorum", "Age: 500 Years Old in 2010", "Bonsai Style: Cascade Style"],
+    "modelH.ply": ["Name: AUSTRALIAN BRUSH CHERRY", "Binomial Name: Syzygium paniculatum", "Bonsai Style: Informal Upright"],
+    "modelI.ply": ["Name: DAWN REDWOOD", "Binomial Name: Metasequoia Glyptostroboides", "Bonsai Style: FOREST"],
   };
 
-  init(); animate();
+  // -----------------------------
+  // Back button
+  // -----------------------------
+  const backEl = document.getElementById("back");
+  if (backEl) backEl.onclick = () => (window.location.href = "index.html");
 
-  function init() {
+  // -----------------------------
+  // Info helper
+  // -----------------------------
+  const infoDiv = document.getElementById("info");
+  function setInfo(lines) {
+    if (!infoDiv) return;
+    infoDiv.innerHTML = lines.map((l) => `<p>${l}</p>`).join("");
+  }
+
+  function getManualInfoLines() {
+    return plyInfo[fileParam] ? [...plyInfo[fileParam]] : [];
+  }
+
+  function updateInfoPanel({ mode, pointsCount = null }) {
+    const lines = [`File: ${fileParam}`, `Mode: ${mode}`, ...getManualInfoLines()];
+    if (pointsCount !== null) lines.push(`Points (from file): ${Number(pointsCount).toLocaleString()}`);
+    lines.push(`PointCloud: ${plyUrl}`);
+    lines.push(`Splat: ${splatUrl}`);
+    setInfo(lines);
+  }
+
+  // -----------------------------
+  // Toggle button
+  // -----------------------------
+  const toggleBtn = document.createElement("div");
+  toggleBtn.className = "mode-toggle";
+  document.body.appendChild(toggleBtn);
+
+  function setToggleLabel(isSplat) {
+    toggleBtn.textContent = isSplat ? "Point Cloud" : "Gaussian Splats";
+  }
+
+  // -----------------------------
+  // One-time loading overlay
+  // -----------------------------
+  const loadingOverlay = document.createElement("div");
+  loadingOverlay.className = "loading-overlay";
+  loadingOverlay.innerHTML = `
+    <div class="dots" aria-label="Loading">
+      <div class="dot"></div><div class="dot"></div><div class="dot"></div><div class="dot"></div><div class="dot"></div>
+    </div>`;
+  document.body.appendChild(loadingOverlay);
+
+  const showLoading = () => (loadingOverlay.style.display = "flex");
+  const hideLoading = () => (loadingOverlay.style.display = "none");
+
+  // -----------------------------
+  // Toast (splat unavailable)
+  // -----------------------------
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.textContent = "Gaussian Splats coming soon — this model isn’t available yet.";
+  document.body.appendChild(toast);
+
+  let toastTimer = null;
+  function showToast(message) {
+    toast.textContent = message;
+    toast.classList.add("show");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.classList.remove("show");
+      toastTimer = null;
+    }, TOAST_SHOW_MS);
+  }
+
+  // -----------------------------
+  // Shared camera state (sync modes)
+  // -----------------------------
+  const sharedCameraState = {
+    camPos: new THREE.Vector3(0, 0, 2.5),
+    target: new THREE.Vector3(0, 0, 0),
+    fov: 60,
+    near: 0.1,
+    far: 1000,
+  };
+
+  // -----------------------------
+  // Splat state (cached forever)
+  // -----------------------------
+  const splatState = {
+    enabled: false,
+    ready: false,
+    loading: false,
+
+    pc: null,
+    app: null,
+    canvas: null,
+    camEntity: null,
+
+    yaw: 0,
+    pitch: 0,
+    dist: 2.5,
+    target: null,
+
+    orbiting: true,
+    orbitResumeTimer: null,
+
+    available: null, // null unknown, true/false after check
+  };
+
+  // -----------------------------
+  // Three.js point cloud viewer
+  // -----------------------------
+  let scene, camera, renderer, controls, clock;
+  let points, material;
+
+  let orbiting = true;
+  let orbitResumeTimer = null;
+
+  const guiParams = { pointSize: 0.0075, shadingIntensity: 1.5, revealNoise: 0.1 };
+
+  // -----------------------------
+  // Fade helpers
+  // -----------------------------
+  function configureFade(el) {
+    el.style.transition = `opacity ${FADE_MS}ms ease`;
+    el.style.willChange = "opacity";
+  }
+  function setVisible(el, visible) {
+    el.style.opacity = visible ? "1" : "0";
+    el.style.pointerEvents = visible ? "auto" : "none";
+  }
+  function crossfade(toSplat) {
+    if (renderer?.domElement) renderer.domElement.style.display = "block";
+    if (splatState.canvas) splatState.canvas.style.display = "block";
+
+    if (toSplat) {
+      if (renderer?.domElement) setVisible(renderer.domElement, false);
+      if (splatState.canvas) setVisible(splatState.canvas, true);
+    } else {
+      if (splatState.canvas) setVisible(splatState.canvas, false);
+      if (renderer?.domElement) setVisible(renderer.domElement, true);
+    }
+  }
+
+  // -----------------------------
+  // Required helper
+  // -----------------------------
+  function computeYawPitchDistFromWorld(camPos3, target3) {
+    const dx = camPos3.x - target3.x;
+    const dy = camPos3.y - target3.y;
+    const dz = camPos3.z - target3.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+    const pitch = Math.asin(dy / dist);
+    const yaw = Math.atan2(dx, dz);
+    return { yaw, pitch, dist };
+  }
+
+  // -----------------------------
+  // Boot UI
+  // -----------------------------
+  setToggleLabel(false);
+  updateInfoPanel({ mode: "POINT CLOUD" });
+
+  initThree();
+  animateThree();
+
+  // -----------------------------
+  // Resize
+  // -----------------------------
+  function onResize() {
+    if (camera && renderer) {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    if (splatState.app) {
+      try { splatState.app.resizeCanvas(); } catch {}
+    }
+  }
+  window.addEventListener("resize", onResize);
+
+  // -----------------------------
+  // Orbit pause (Three)
+  // -----------------------------
+  function pauseOrbitThree() {
+    orbiting = false;
+    if (orbitResumeTimer) clearTimeout(orbitResumeTimer);
+    orbitResumeTimer = setTimeout(() => {
+      orbiting = true;
+      orbitResumeTimer = null;
+    }, ORBIT_RESUME_DELAY_MS);
+  }
+
+  // -----------------------------
+  // Init Three
+  // -----------------------------
+  function initThree() {
     scene = new THREE.Scene();
-    scene.background = new THREE.Color('#000000');
+    scene.background = new THREE.Color("#000");
 
-    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera = new THREE.PerspectiveCamera(
+      sharedCameraState.fov,
+      window.innerWidth / window.innerHeight,
+      sharedCameraState.near,
+      sharedCameraState.far
+    );
+
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(window.devicePixelRatio); // Keep HiDPI
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.domElement.style.position = "absolute";
+    renderer.domElement.style.inset = "0";
+    renderer.domElement.style.zIndex = "1";
+    renderer.domElement.style.opacity = "1";
+    renderer.domElement.style.pointerEvents = "auto";
+    configureFade(renderer.domElement);
     document.body.appendChild(renderer.domElement);
 
     controls = new OrbitControls(camera, renderer.domElement);
-    const resetIdle = () => {
-      orbiting = false;
-      clearTimeout(idleTimeout);
-      idleTimeout = setTimeout(() => orbiting = true, idleDelay);
-    };
-    controls.addEventListener('start', () => orbiting = false);
-    controls.addEventListener('end', resetIdle);
-    ['mousedown','wheel','touchstart','keydown'].forEach(e => window.addEventListener(e, resetIdle));
-
     clock = new THREE.Clock();
-    window.addEventListener('resize', onResize);
+
+    controls.addEventListener("start", () => {
+      orbiting = false;
+      if (orbitResumeTimer) clearTimeout(orbitResumeTimer);
+    });
+    controls.addEventListener("end", () => pauseOrbitThree());
+
+    renderer.domElement.addEventListener("wheel", pauseOrbitThree, { passive: true });
+    renderer.domElement.addEventListener("touchstart", pauseOrbitThree, { passive: true });
+    renderer.domElement.addEventListener("pointerdown", pauseOrbitThree, { passive: true });
 
     new PLYLoader().load(
-      plyFile,
-      onLoad,
+      plyUrl,
+      (geometry) => {
+        geometry.computeBoundingSphere();
+
+        const posAttr = geometry.getAttribute("position");
+        const count = posAttr ? posAttr.count : 0;
+
+        if (!geometry.getAttribute("color")) {
+          const cols = new Float32Array(count * 3).fill(1);
+          geometry.setAttribute("color", new THREE.BufferAttribute(cols, 3));
+        }
+
+        // Reveal range
+        const dir = new THREE.Vector3(1, 0, 1).normalize();
+        let minD = Infinity, maxD = -Infinity;
+        for (let i = 0; i < count; i++) {
+          const d = posAttr.getX(i) * dir.x + posAttr.getY(i) * dir.y + posAttr.getZ(i) * dir.z;
+          minD = Math.min(minD, d);
+          maxD = Math.max(maxD, d);
+        }
+
+        material = createRevealMaterial(dir, minD, maxD);
+        points = new THREE.Points(geometry, material);
+        scene.add(points);
+
+        const center = geometry.boundingSphere.center;
+        const radius = geometry.boundingSphere.radius || 1;
+
+        camera.position.copy(center).add(new THREE.Vector3(0, 0, radius * 1.7));
+        controls.target.copy(center);
+        controls.update();
+
+        sharedCameraState.camPos.copy(camera.position);
+        sharedCameraState.target.copy(controls.target);
+        sharedCameraState.fov = camera.fov;
+        sharedCameraState.near = camera.near;
+        sharedCameraState.far = camera.far;
+
+        clock.start();
+        orbiting = true;
+
+        updateInfoPanel({ mode: "POINT CLOUD", pointsCount: count });
+      },
       undefined,
-      err => console.error('Error loading PLY:', err)
+      () => setInfo([`File: ${fileParam}`, `Mode: POINT CLOUD`, `Failed loading: ${plyUrl}`])
     );
-
-    document.getElementById('back').onclick = () => window.location.href = 'index.html';
-
-    // Show manual info immediately while loading; point count gets appended after load.
-    updateInfoBox(fileParam);
-  }
-
-  function onLoad(geometry) {
-    geometry.computeBoundingSphere();
-
-    // Raw, from-file point count (before any densify)
-    const posAttr = geometry.getAttribute('position');
-    origCount = posAttr ? posAttr.count : 0;
-
-    // Keep originals to support densify
-    origPositions = posAttr ? posAttr.array.slice() : new Float32Array();
-    const colorAttr = geometry.getAttribute('color');
-    origColors = colorAttr ? colorAttr.array.slice() : new Float32Array(origCount * 3).fill(1);
-
-    // Build initial (possibly densified) Points object
-    densifyGeometry(guiParams.density);
-
-    // Compute reveal range along a direction
-    const dir = new THREE.Vector3(1, 0, 1).normalize();
-    let minD = Infinity, maxD = -Infinity;
-    const posArr = points.geometry.getAttribute('position');
-    for (let i = 0; i < posArr.count; i++) {
-      const v = new THREE.Vector3(posArr.getX(i), posArr.getY(i), posArr.getZ(i));
-      const d = v.dot(dir);
-      minD = Math.min(minD, d);
-      maxD = Math.max(maxD, d);
-    }
-
-    // Camera framing
-    const center = points.geometry.boundingSphere.center;
-    const radius = points.geometry.boundingSphere.radius;
-    camera.position.copy(center).add(new THREE.Vector3(0, 0, radius * 1.7));
-    controls.target.copy(center); controls.update();
-
-    // Shader material
-    material = createRevealMaterial(dir, minD, maxD);
-    points.material = material;
-    material.uniforms.uReveal.value = 0;
-
-    // Append computed point count to info box (raw from file)
-    updateInfoBox(fileParam, { pointCount: origCount });
-
-    clock.start(); orbiting = true;
-  }
-
-  function densifyGeometry(density) {
-    const count = origCount;
-    const newCount = count * (1 + density);
-    const positions = new Float32Array(newCount * 3);
-    const colors    = new Float32Array(newCount * 3);
-    let src = 0, dst = 0;
-
-    for (let i = 0; i < count; i++) {
-      positions.set(origPositions.subarray(src, src + 3), dst);
-      colors.set(origColors.subarray(src, src + 3), dst); dst += 3;
-
-      for (let j = 0; j < density; j++) {
-        positions[dst]   = origPositions[src]   + (Math.random() - 0.5) * 0.01;
-        positions[dst+1] = origPositions[src+1] + (Math.random() - 0.5) * 0.01;
-        positions[dst+2] = origPositions[src+2] + (Math.random() - 0.5) * 0.01;
-        colors.set(origColors.subarray(src, src + 3), dst); dst += 3;
-      }
-      src += 3;
-    }
-
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
-    geo.computeBoundingSphere();
-
-    if (points) { points.geometry.dispose(); points.geometry = geo; }
-    else { points = new THREE.Points(geo, null); scene.add(points); }
   }
 
   function createRevealMaterial(dir, minD, maxD) {
-    const pr = renderer.getPixelRatio ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
+    const pr = renderer.getPixelRatio ? renderer.getPixelRatio() : window.devicePixelRatio || 1;
     const scale = (window.innerHeight * pr) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
-    const defs = {};
-    if (guiParams.sizeAttenuation) defs.USE_SIZE_ATTENUATION = '';
-    if (guiParams.vertexColors)    defs.USE_VERTEX_COLORS    = '';
 
     return new THREE.ShaderMaterial({
-      defines: defs,
       transparent: true,
       uniforms: {
-        uSize:   { value: guiParams.pointSize },
-        uScale:  { value: scale },
-        uShade:  { value: guiParams.shadingIntensity },
-        uDir:    { value: dir },
-        uMin:    { value: minD },
-        uMax:    { value: maxD },
+        uSize: { value: guiParams.pointSize },
+        uScale: { value: scale },
+        uShade: { value: guiParams.shadingIntensity },
+        uDir: { value: dir },
+        uMin: { value: minD },
+        uMax: { value: maxD },
         uReveal: { value: 0 },
-        uNoise:  { value: guiParams.revealNoise }
+        uNoise: { value: guiParams.revealNoise },
       },
       vertexShader: `
-        uniform vec3 uDir; uniform float uSize; uniform float uScale;
+        uniform vec3 uDir;
+        uniform float uSize;
+        uniform float uScale;
         varying float vDot;
-        #ifdef USE_VERTEX_COLORS
-          attribute vec3 color;
-          varying vec3 vColor;
-        #endif
+        attribute vec3 color;
+        varying vec3 vColor;
         void main() {
-          #ifdef USE_VERTEX_COLORS
-            vColor = color;
-          #endif
+          vColor = color;
           vDot = dot(position, uDir);
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           gl_Position = projectionMatrix * mv;
-          #ifdef USE_SIZE_ATTENUATION
-            gl_PointSize = uSize * (uScale / -mv.z);
-          #else
-            gl_PointSize = uSize;
-          #endif
+          gl_PointSize = uSize * (uScale / -mv.z);
         }
       `,
       fragmentShader: `
         precision highp float;
         varying float vDot;
         uniform float uShade, uMin, uMax, uReveal, uNoise;
-        #ifdef USE_VERTEX_COLORS
-          varying vec3 vColor;
-        #endif
+        varying vec3 vColor;
         void main() {
           float t = (vDot - uMin) / (uMax - uMin);
           float rnd = fract(sin(vDot * 12.9898) * 43758.5453);
@@ -355,64 +490,344 @@
 
           float glow = smoothstep(uReveal - uNoise, uReveal, t) * (1.0 - smoothstep(uReveal, uReveal + uNoise, t));
           float shade = uShade + glow * uShade;
-
-          #ifdef USE_VERTEX_COLORS
-            gl_FragColor = vec4(vColor * shade, 1.0);
-          #else
-            gl_FragColor = vec4(vec3(shade), 1.0);
-          #endif
+          gl_FragColor = vec4(vColor * shade, 1.0);
         }
       `,
-      depthTest: true
+      depthTest: true,
     });
   }
 
-  function updateMaterial() {
-    if (!points) return;
-    const dir = material.uniforms.uDir.value;
-    const minD = material.uniforms.uMin.value;
-    const maxD = material.uniforms.uMax.value;
-    const rev = material.uniforms.uReveal.value;
-    material.dispose();
-    material = createRevealMaterial(dir, minD, maxD);
-    material.uniforms.uReveal.value = rev;
-    points.material = material;
-  }
+  function animateThree() {
+    requestAnimationFrame(animateThree);
+    if (!renderer || !scene || !camera || !controls || !clock) return;
+    if (splatState.enabled) return;
 
-  function onResize() {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    if (material) {
-      const pr = renderer.getPixelRatio ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
-      material.uniforms.uScale.value = (window.innerHeight * pr) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
-    }
-  }
-
-  function animate() {
-    requestAnimationFrame(animate);
     const dt = clock.getDelta();
 
-    if (orbiting) {
+    if (orbiting && points) {
       const tx = controls.target.x, tz = controls.target.z;
       const cx = camera.position.x - tx, cz = camera.position.z - tz;
-      const newAngle = Math.atan2(cz, cx) + (maxOrbitAngle / orbitDuration) * dt;
+      const newAngle = Math.atan2(cz, cx) + (MAX_ORBIT_ANGLE / ORBIT_DURATION) * dt;
       const r = Math.sqrt(cx * cx + cz * cz);
       camera.position.set(tx + Math.cos(newAngle) * r, camera.position.y, tz + Math.sin(newAngle) * r);
       camera.lookAt(controls.target);
     }
 
-    // Keep uScale in sync with DPR; update reveal
     if (material) {
-      const pr = renderer.getPixelRatio ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
+      const pr = renderer.getPixelRatio ? renderer.getPixelRatio() : window.devicePixelRatio || 1;
       material.uniforms.uScale.value = (window.innerHeight * pr) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
-      material.uniforms.uReveal.value = Math.min(clock.getElapsedTime() / revealDuration, 1);
+      material.uniforms.uReveal.value = Math.min(clock.getElapsedTime() / REVEAL_DURATION, 1);
     }
 
     controls.update();
+
+    sharedCameraState.camPos.copy(camera.position);
+    sharedCameraState.target.copy(controls.target);
+    sharedCameraState.fov = camera.fov;
+    sharedCameraState.near = camera.near;
+    sharedCameraState.far = camera.far;
+
     renderer.render(scene, camera);
   }
+
+  // -----------------------------
+  // SPLAT availability check (fast)
+  // -----------------------------
+  async function checkSplatAvailable() {
+    if (splatState.available !== null) return splatState.available;
+    try {
+      // Try HEAD first. If server doesn't support HEAD, fallback to GET.
+      let res = await fetch(splatUrl, { method: "HEAD", cache: "no-store" });
+      if (!res.ok) {
+        res = await fetch(splatUrl, { method: "GET", cache: "no-store" });
+      }
+      splatState.available = res.ok;
+    } catch {
+      splatState.available = false;
+    }
+    return splatState.available;
+  }
+
+  // -----------------------------
+  // SPLAT: one-time loader (no preload)
+  // -----------------------------
+  function pauseOrbitSplat() {
+    splatState.orbiting = false;
+    if (splatState.orbitResumeTimer) clearTimeout(splatState.orbitResumeTimer);
+    splatState.orbitResumeTimer = setTimeout(() => {
+      splatState.orbiting = true;
+      splatState.orbitResumeTimer = null;
+    }, ORBIT_RESUME_DELAY_MS);
+  }
+
+  function applySplatCameraPose() {
+    const cam = splatState.camEntity;
+    if (!cam || !splatState.target) return;
+
+    const cosP = Math.cos(splatState.pitch);
+    const sinP = Math.sin(splatState.pitch);
+    const cosY = Math.cos(splatState.yaw);
+    const sinY = Math.sin(splatState.yaw);
+
+    const x = splatState.target.x + splatState.dist * cosP * sinY;
+    const y = splatState.target.y + splatState.dist * sinP;
+    const z = splatState.target.z + splatState.dist * cosP * cosY;
+
+    cam.setPosition(x, y, z);
+    cam.lookAt(splatState.target);
+  }
+
+  function getSplatCameraWorldPosition() {
+    const cosP = Math.cos(splatState.pitch);
+    const sinP = Math.sin(splatState.pitch);
+    const cosY = Math.cos(splatState.yaw);
+    const sinY = Math.sin(splatState.yaw);
+
+    return {
+      x: splatState.target.x + splatState.dist * cosP * sinY,
+      y: splatState.target.y + splatState.dist * sinP,
+      z: splatState.target.z + splatState.dist * cosP * cosY,
+    };
+  }
+
+  async function ensureSplatLoadedOnce_WithLoader() {
+    if (splatState.ready) return;
+    if (splatState.loading) return;
+
+    splatState.loading = true;
+    showLoading();
+
+    try {
+      // Create canvas (hidden initially for fade)
+      if (!splatState.canvas) {
+        const c = document.createElement("canvas");
+        c.id = "splatCanvas";
+        c.style.position = "absolute";
+        c.style.inset = "0";
+        c.style.width = "100%";
+        c.style.height = "100%";
+        c.style.zIndex = "2";
+        c.style.display = "block";
+        c.style.opacity = "0";
+        c.style.pointerEvents = "none";
+        configureFade(c);
+        document.body.appendChild(c);
+        splatState.canvas = c;
+      }
+
+      // Load PlayCanvas
+      if (!splatState.pc) {
+        splatState.pc = await import("https://cdn.jsdelivr.net/npm/playcanvas/+esm");
+      }
+      const pc = splatState.pc;
+
+      // Create app once
+      if (!splatState.app) {
+        const { Application, Entity, Color, FILLMODE_FILL_WINDOW, RESOLUTION_AUTO } = pc;
+
+        const app = new Application(splatState.canvas, {
+          graphicsDeviceOptions: { antialias: false },
+        });
+        splatState.app = app;
+        app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
+        app.setCanvasResolution(RESOLUTION_AUTO);
+        app.start();
+
+        const cam = new Entity("Camera");
+        cam.addComponent("camera", {
+          clearColor: new Color(0, 0, 0),
+          fov: sharedCameraState.fov,
+          nearClip: sharedCameraState.near,
+          farClip: sharedCameraState.far,
+        });
+        app.root.addChild(cam);
+        splatState.camEntity = cam;
+
+        installSplatControlsOnce(app, cam);
+      }
+
+      // Load gsplat asset once
+      const app2 = splatState.app;
+      await new Promise((resolve, reject) => {
+        const asset = new pc.Asset("bonsai-splat", "gsplat", { url: splatUrl });
+        asset.on("load", () => resolve());
+        asset.on("error", (err) => reject(err || new Error("gsplat asset error")));
+        app2.assets.add(asset);
+        app2.assets.load(asset);
+      });
+
+      // Add splat entity once
+      if (!app2.root.findByName("Splat")) {
+        const { Entity } = pc;
+        const splatEnt = new Entity("Splat");
+        splatEnt.addComponent("gsplat", { asset: app2.assets.find("bonsai-splat") });
+        app2.root.addChild(splatEnt);
+      }
+
+      splatState.ready = true;
+      splatState.app.timeScale = 0;
+    } finally {
+      splatState.loading = false;
+      hideLoading();
+    }
+  }
+
+  async function showSplat() {
+    // Quick availability check before doing any heavy work
+    const ok = await checkSplatAvailable();
+    if (!ok) {
+      showToast("Gaussian Splats are coming soon — this model isn’t available yet.");
+      return; // keep point cloud running, do not change view
+    }
+
+    // Capture current Three pose
+    if (camera && controls) {
+      sharedCameraState.camPos.copy(camera.position);
+      sharedCameraState.target.copy(controls.target);
+      sharedCameraState.fov = camera.fov;
+      sharedCameraState.near = camera.near;
+      sharedCameraState.far = camera.far;
+    }
+
+    // One-time load with explicit loader
+    if (!splatState.ready) {
+      try {
+        await ensureSplatLoadedOnce_WithLoader();
+      } catch (e) {
+        showToast("Couldn’t load Gaussian Splats for this model.");
+        return;
+      }
+    }
+
+    // Lens sync
+    try {
+      const camComp = splatState.camEntity?.camera;
+      if (camComp) {
+        camComp.fov = sharedCameraState.fov;
+        camComp.nearClip = sharedCameraState.near;
+        camComp.farClip = sharedCameraState.far;
+      }
+    } catch {}
+
+    // Seed orbit from Three pose
+    const init = computeYawPitchDistFromWorld(sharedCameraState.camPos, sharedCameraState.target);
+    const pc = splatState.pc;
+    splatState.target = new pc.Vec3(sharedCameraState.target.x, sharedCameraState.target.y, sharedCameraState.target.z);
+    splatState.yaw = init.yaw;
+    splatState.pitch = init.pitch;
+    splatState.dist = init.dist;
+    splatState.orbiting = true;
+    applySplatCameraPose();
+
+    // Show + crossfade
+    splatState.enabled = true;
+    setToggleLabel(true);
+    if (splatState.app) splatState.app.timeScale = 1;
+
+    crossfade(true);
+    updateInfoPanel({ mode: "SPLAT" });
+  }
+
+  function hideSplat() {
+    if (!splatState.enabled) return;
+
+    // Sync back pose
+    if (splatState.target) {
+      const w = getSplatCameraWorldPosition();
+      sharedCameraState.camPos.set(w.x, w.y, w.z);
+      sharedCameraState.target.set(splatState.target.x, splatState.target.y, splatState.target.z);
+
+      if (camera && controls) {
+        camera.position.copy(sharedCameraState.camPos);
+        controls.target.copy(sharedCameraState.target);
+        controls.update();
+      }
+    }
+
+    splatState.enabled = false;
+    setToggleLabel(false);
+    if (splatState.app) splatState.app.timeScale = 0;
+
+    crossfade(false);
+    updateInfoPanel({ mode: "POINT CLOUD" });
+  }
+
+  function installSplatControlsOnce(app, camEntity) {
+    const canvas = app.graphicsDevice.canvas;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const markInteraction = () => pauseOrbitSplat();
+
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    let draggingOrbit = false;
+    let draggingPan = false;
+    let lastX = 0, lastY = 0;
+
+    canvas.addEventListener("pointerdown", (e) => {
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (e.button === 2) draggingPan = true;
+      else draggingOrbit = true;
+      markInteraction();
+    }, { passive: true });
+
+    window.addEventListener("pointerup", () => {
+      if (draggingOrbit || draggingPan) markInteraction();
+      draggingOrbit = false;
+      draggingPan = false;
+    }, { passive: true });
+
+    window.addEventListener("pointermove", (e) => {
+      if (!draggingOrbit && !draggingPan) return;
+
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+
+      if (draggingOrbit) {
+        splatState.yaw -= dx * 0.005;
+        splatState.pitch += dy * 0.005;
+        splatState.pitch = clamp(splatState.pitch, -1.2, 1.2);
+      } else if (draggingPan && splatState.target) {
+        const scale = SPLAT_PAN_SENS * splatState.dist;
+        const right = camEntity.right.clone().scale(-dx * scale);
+        const up = camEntity.up.clone().scale(dy * scale);
+        splatState.target.add(right);
+        splatState.target.add(up);
+      }
+
+      markInteraction();
+    }, { passive: true });
+
+    canvas.addEventListener("wheel", (e) => {
+      const factor = Math.exp(e.deltaY * SPLAT_ZOOM_EXP_COEFF);
+      splatState.dist *= factor;
+      splatState.dist = clamp(splatState.dist, 0.2, 50);
+      markInteraction();
+    }, { passive: true });
+
+    app.on("update", (dt) => {
+      if (!splatState.target || !splatState.camEntity) return;
+
+      if (splatState.orbiting) {
+        splatState.yaw -= (MAX_ORBIT_ANGLE / ORBIT_DURATION) * dt;
+      }
+
+      applySplatCameraPose();
+    });
+  }
+
+  // -----------------------------
+  // Toggle behavior
+  // -----------------------------
+  setToggleLabel(false);
+  toggleBtn.addEventListener("click", async () => {
+    if (!splatState.enabled) await showSplat();
+    else hideSplat();
+  });
 </script>
+
 
 </body>
 </html>
