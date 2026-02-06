@@ -186,10 +186,10 @@
   }
 
   function updateInfoPanel({ mode, pointsCount = null }) {
-    const lines = [`File: ${fileParam}`, `Mode: ${mode}`, ...getManualInfoLines()];
+    const lines = [`Mode: ${mode}`, ...getManualInfoLines()]; //file name code- `File: ${fileParam}`,
     if (pointsCount !== null) lines.push(`Points (from file): ${Number(pointsCount).toLocaleString()}`);
-    lines.push(`PointCloud: ${plyUrl}`);
-    lines.push(`Splat: ${splatUrl}`);
+    //lines.push(`PointCloud: ${plyUrl}`);
+    //lines.push(`Splat: ${splatUrl}`);
     setInfo(lines);
   }
 
