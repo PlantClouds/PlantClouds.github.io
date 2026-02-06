@@ -101,7 +101,7 @@
 
   gallery.style.display = 'grid';
   gallery.style.gridTemplateColumns = 'repeat(2, 1fr)';
-  gallery.style.gridAutoRows = '50vh'; // 2 rows per viewport
+  gallery.style.gridAutoRows = '50vh';
   gallery.style.height = 'auto';
   gallery.style.width = '100vw';
 
@@ -117,40 +117,39 @@
   const MAX_CONCURRENT_LOADS = 2;
   let activeLoads = 0;
 
-  // Use a Set + Array to avoid duplicates and preserve order
   const queuedCanvases = new Set();
   const queue = [];
 
-  function enqueueLoad(canvas, fileName) {
+  function enqueueLoad(tile, canvas, fileName) {
     if (canvas.dataset.loaded || canvas.dataset.enqueued) return;
 
     canvas.dataset.enqueued = '1';
 
-    // Keep only one entry per canvas
     if (!queuedCanvases.has(canvas)) {
       queuedCanvases.add(canvas);
-      queue.push({ canvas, fileName });
+      queue.push({ tile, canvas, fileName });
       pumpQueue();
     }
   }
 
   function pumpQueue() {
     while (activeLoads < MAX_CONCURRENT_LOADS && queue.length > 0) {
-      const { canvas, fileName } = queue.shift();
+      const { tile, canvas, fileName } = queue.shift();
       queuedCanvases.delete(canvas);
 
-      // In case it got loaded by something else
       if (canvas.dataset.loaded) continue;
 
       activeLoads++;
-      initTilePreview(canvas, fileName, () => {
+      initTilePreview(tile, canvas, fileName, () => {
         activeLoads--;
         pumpQueue();
       });
     }
   }
 
-  // --- Lazy enqueue with IntersectionObserver ---
+  // -----------------------------
+  // Lazy enqueue
+  // -----------------------------
   const io = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
@@ -158,39 +157,37 @@
 
         const tile = entry.target;
         const canvas = tile.querySelector('canvas');
-        const fileName = tile.dataset.file;
+        enqueueLoad(tile, canvas, tile.dataset.file);
 
-        enqueueLoad(canvas, fileName);
-
-        // Once it has been queued, stop observing so we don't enqueue repeatedly
         io.unobserve(tile);
       }
     },
     {
       root: null,
-      rootMargin: '250px 0px 250px 0px', // preload a bit
+      rootMargin: '80px 0px 80px 0px',
       threshold: 0.01,
     }
   );
 
   fetch('./models/models.json')
-    .then(res => res.ok ? res.json() : Promise.reject('Manifest not found'))
+    .then(res => res.ok ? res.json() : Promise.reject())
     .catch(() => defaultFiles)
     .then(files => {
       files.forEach(fileName => {
         const tile = document.createElement('div');
         tile.className = 'tile';
         tile.dataset.file = fileName;
+        tile.style.background = '#000';
+
         tile.onclick = () =>
           window.location.href = `viewer.html?ply=${encodeURIComponent(fileName)}`;
 
-        // SVG border overlay matching your CSS radius
+        // SVG border overlay
         const svgNS = 'http://www.w3.org/2000/svg';
         const svg = document.createElementNS(svgNS, 'svg');
         svg.classList.add('hover-border');
         svg.setAttribute('width', '100%');
         svg.setAttribute('height', '100%');
-
         const rect = document.createElementNS(svgNS, 'rect');
         rect.setAttribute('x', '0');
         rect.setAttribute('y', '0');
@@ -200,24 +197,106 @@
         rect.setAttribute('ry', '80');
         svg.appendChild(rect);
 
-        tile.appendChild(svg);
-
-        // Canvas preview (loaded lazily / queued)
+        // Canvas FIRST
         const canvas = document.createElement('canvas');
+
+        // Loader LAST (always on top)
+        const loaderOverlay = document.createElement('div');
+        loaderOverlay.className = 'ply-loader';
+        loaderOverlay.innerHTML = `
+          <div class="dot-track">
+            <span></span><span></span><span></span><span></span>
+          </div>
+        `;
+
+        tile.appendChild(svg);
         tile.appendChild(canvas);
+        tile.appendChild(loaderOverlay);
 
         gallery.appendChild(tile);
-
-        // Observe for lazy enqueue
         io.observe(tile);
       });
+
+      injectLoaderCSS();
     });
 
-  function initTilePreview(canvas, file, done) {
-    // Mark as loaded early so we don't double-load if something weird happens
+  function injectLoaderCSS() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .tile {
+        position: relative;
+        background: #000;
+        overflow: hidden;
+      }
+
+      .tile canvas{
+        position:absolute;
+        inset:0;
+        width:100%;
+        height:100%;
+        display:block;
+        z-index: 1;
+      }
+
+      .tile .hover-border{
+        position:absolute;
+        inset:0;
+        z-index: 20;
+        pointer-events:none;
+      }
+
+      /* IMPORTANT: show loader by default, hide ONLY when ready */
+      .ply-loader{
+        position:absolute;
+        inset:0;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        pointer-events:none;
+
+        opacity:1;            /* always visible until ready */
+        transition: opacity 180ms ease;
+        background:#000;      /* black behind dots */
+        z-index: 30;          /* above canvas, above almost everything */
+      }
+
+      .tile.is-ready .ply-loader{
+        opacity:0;
+      }
+
+      .dot-track{
+        display:flex;
+        gap:10px;
+      }
+
+      .dot-track span{
+        width:8px;
+        height:8px;
+        border-radius:50%;
+        background:#fff;
+        opacity:0.25;
+        animation: dotPulse 1.1s infinite ease-in-out;
+      }
+
+      .dot-track span:nth-child(1){ animation-delay: 0s; }
+      .dot-track span:nth-child(2){ animation-delay: .12s; }
+      .dot-track span:nth-child(3){ animation-delay: .24s; }
+      .dot-track span:nth-child(4){ animation-delay: .36s; }
+
+      @keyframes dotPulse{
+        0%   { opacity:.25; transform:translateY(0) scale(1); }
+        30%  { opacity:1;  transform:translateY(-4px) scale(1.25); }
+        60%  { opacity:.35; transform:translateY(0) scale(1); }
+        100% { opacity:.25; transform:translateY(0) scale(1); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function initTilePreview(tile, canvas, file, done) {
     canvas.dataset.loaded = '1';
 
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(
       50,
@@ -226,7 +305,7 @@
       100
     );
 
-    renderer.setSize(Math.max(1, canvas.clientWidth), Math.max(1, canvas.clientHeight));
+    renderer.setSize(Math.max(1, canvas.clientWidth), Math.max(1, canvas.clientHeight), false);
 
     const ro = new ResizeObserver(entries => {
       for (const entry of entries) {
@@ -234,7 +313,7 @@
         if (width <= 0 || height <= 0) return;
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
-        renderer.setSize(width, height);
+        renderer.setSize(width, height, false);
       }
     });
     ro.observe(canvas);
@@ -252,6 +331,7 @@
       `models/${file}`,
       geometry => {
         geometry.computeVertexNormals();
+        if (!geometry.boundingSphere) geometry.computeBoundingSphere();
 
         if (!geometry.getAttribute('color')) {
           const c = geometry.getAttribute('position').count;
@@ -267,19 +347,17 @@
         });
 
         const points = new THREE.Points(geometry, material);
-
-        // Center model
-        if (geometry.boundingSphere == null) geometry.computeBoundingSphere();
-        const center = geometry.boundingSphere ? geometry.boundingSphere.center : new THREE.Vector3();
-        points.position.sub(center);
-
+        points.position.sub(geometry.boundingSphere.center);
         scene.add(points);
 
-        const radius = geometry.boundingSphere ? geometry.boundingSphere.radius : 1;
+        const radius = geometry.boundingSphere.radius || 1;
         camera.position.set(0, 0, radius * 2.0);
         camera.lookAt(0, 0, 0);
 
-        // Release the queue slot as soon as the model is ready (we don't gate animation)
+        // Hide dots ONLY when this tile is actually ready
+        tile.classList.add('is-ready');
+
+        // Free the concurrency slot
         finishOnce();
 
         function animate() {
@@ -292,12 +370,13 @@
       undefined,
       err => {
         console.error(`Error loading ${file}:`, err);
+        // On error, still hide loader so it doesn't spin forever
+        tile.classList.add('is-ready');
         finishOnce();
       }
     );
   }
 </script>
-
 
 </body>
 </html>
